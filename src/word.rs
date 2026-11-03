@@ -115,6 +115,8 @@ pub struct UWordBounds<'a> {
     string: &'a str,
     cat: Option<WordCat>,
     catb: Option<WordCat>,
+    // True if `string` is all ASCII. Then `AsciiWordBoundIter` gives the same bounds.
+    is_ascii: bool,
 }
 
 /// External iterator for word boundaries and byte offsets.
@@ -229,6 +231,12 @@ impl<'a> Iterator for UWordBounds<'a> {
         use crate::tables::word as wd;
         if self.string.is_empty() {
             return None;
+        }
+        if self.is_ascii {
+            let mut iter = AsciiWordBoundIter::new(self.string);
+            let (_, word) = iter.next()?;
+            self.string = iter.rest;
+            return Some(word);
         }
 
         let mut take_curr = true;
@@ -470,6 +478,12 @@ impl<'a> DoubleEndedIterator for UWordBounds<'a> {
         use crate::tables::word as wd;
         if self.string.is_empty() {
             return None;
+        }
+        if self.is_ascii {
+            let mut iter = AsciiWordBoundIter::new(self.string);
+            let (_, word) = iter.next_back()?;
+            self.string = iter.rest;
+            return Some(word);
         }
 
         let mut take_curr = true;
@@ -837,7 +851,7 @@ impl<'a> AsciiWordBoundIter<'a> {
 impl<'a> Iterator for AsciiWordBoundIter<'a> {
     type Item = (usize, &'a str);
 
-    #[inline]
+    #[inline(always)]
     fn next(&mut self) -> Option<Self::Item> {
         if self.rest.is_empty() {
             return None;
@@ -1009,7 +1023,7 @@ pub fn new_unicode_word_indices(s: &str) -> UnicodeWordIndices<'_> {
     let inner = if s.is_ascii() {
         IndicesIter::Ascii(new_ascii_word_bound_indices(s).filter(ascii_word_ok))
     } else {
-        IndicesIter::Unicode(new_word_bound_indices(s).filter(unicode_word_ok))
+        IndicesIter::Unicode(new_word_bound_indices_unicode(s).filter(unicode_word_ok))
     };
     UnicodeWordIndices { inner }
 }
@@ -1020,6 +1034,18 @@ pub fn new_word_bounds(s: &str) -> UWordBounds<'_> {
         string: s,
         cat: None,
         catb: None,
+        is_ascii: s.is_ascii(),
+    }
+}
+
+// Always uses the full Unicode algorithm, also for ASCII input.
+#[inline]
+fn new_word_bounds_unicode(s: &str) -> UWordBounds<'_> {
+    UWordBounds {
+        string: s,
+        cat: None,
+        catb: None,
+        is_ascii: false,
     }
 }
 
@@ -1028,6 +1054,14 @@ pub fn new_word_bound_indices(s: &str) -> UWordBoundIndices<'_> {
     UWordBoundIndices {
         start_offset: s.as_ptr() as usize,
         iter: new_word_bounds(s),
+    }
+}
+
+#[inline]
+fn new_word_bound_indices_unicode(s: &str) -> UWordBoundIndices<'_> {
+    UWordBoundIndices {
+        start_offset: s.as_ptr() as usize,
+        iter: new_word_bounds_unicode(s),
     }
 }
 
@@ -1062,13 +1096,14 @@ fn new_unicode_words_ascii<'a>(s: &'a str) -> AsciiWordsIter<'a> {
 
 #[inline]
 fn new_unicode_words_general<'a>(s: &'a str) -> UnicodeWordsIter<'a> {
-    new_word_bounds(s).filter(has_alphanumeric)
+    new_word_bounds_unicode(s).filter(has_alphanumeric)
 }
 
 #[cfg(test)]
 mod tests {
     use crate::word::{
         new_ascii_word_bound_indices, new_unicode_words_ascii, new_word_bound_indices,
+        new_word_bound_indices_unicode,
     };
     use std::string::String;
     use std::vec;
@@ -1138,7 +1173,7 @@ mod tests {
                    .prop_map(|v| v.into_iter().collect::<String>())
         ) {
             let fast: Vec<(usize, &str)> = new_ascii_word_bound_indices(&s).collect();
-            let uni:  Vec<(usize, &str)> = new_word_bound_indices(&s).collect();
+            let uni:  Vec<(usize, &str)> = new_word_bound_indices_unicode(&s).collect();
 
             prop_assert_eq!(fast, uni);
         }
@@ -1151,8 +1186,27 @@ mod tests {
                    .prop_map(|v| v.into_iter().collect::<String>())
         ) {
             let fast_rev: Vec<(usize, &str)> = new_ascii_word_bound_indices(&s).rev().collect();
-            let uni_rev : Vec<(usize, &str)> = new_word_bound_indices(&s).rev().collect();
+            let uni_rev : Vec<(usize, &str)> = new_word_bound_indices_unicode(&s).rev().collect();
             prop_assert_eq!(fast_rev, uni_rev);
+        }
+
+        /// `split_word_bound_indices` must equal the general path for any ASCII input,
+        /// also when it takes items from both ends.
+        #[test]
+        fn proptest_ascii_word_bound_indices_both_ends(
+            s in proptest::collection::vec(ascii_char(), 0..100)
+                   .prop_map(|v| v.into_iter().collect::<String>()),
+            back in proptest::collection::vec(any::<bool>(), 100)
+        ) {
+            let mut fast = new_word_bound_indices(&s);
+            let mut uni = new_word_bound_indices_unicode(&s);
+            for &b in &back {
+                if b {
+                    prop_assert_eq!(fast.next_back(), uni.next_back());
+                } else {
+                    prop_assert_eq!(fast.next(), uni.next());
+                }
+            }
         }
     }
 }
